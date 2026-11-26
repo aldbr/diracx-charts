@@ -9,7 +9,7 @@ on:
       - master
 
 # A new push to the same PR cancels the previous run. Runs on master are never
-# cancelled: they may be in the middle of a chart release (cr upload + index push).
+# cancelled: they may be in the middle of a chart release.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -88,7 +88,7 @@ jobs:
           git fetch origin "$BASE_BRANCH"
 
           # Find all top-level Chart.yaml files (exclude subcharts in charts/ subdirectories)
-          # The chart-releaser only releases top-level charts, so we only check those
+          # Only top-level charts are released, so we only check those
           CHART_FILES=$(find . -name "Chart.yaml" -not -path "*/charts/*" -type f | grep -v "/\.")
 
           echo "Checking Chart.yaml files for version bumps..."
@@ -135,30 +135,41 @@ jobs:
             echo "All Chart.yaml files have been properly versioned"
           fi
 
+  # Publishes the chart to the Helm repository served by GitHub Pages
+  # (https://charts.diracgrid.org). The site is deployed from this job, not from
+  # a branch, and no tag or GitHub release is created: a workflow may do neither.
   release:
     name: release
     needs: detect-chart-changes
     if: github.event_name == 'push' && needs.detect-chart-changes.outputs.charts-changed == 'true'
-    # depending on default permission settings for your org (contents being read-only or read-write for workloads), you will have to add permissions
-    # see: https://docs.github.com/en/actions/security-guides/automatic-token-authentication#modifying-the-permissions-for-the-github_token
-    permissions:
-      contents: write  # create the GitHub releases and upload the chart artifacts
     runs-on: ubuntu-latest
+    # One publication at a time: each one starts from the site as the previous one left it.
+    concurrency:
+      group: chart-site
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: https://charts.diracgrid.org
+    permissions:
+      contents: read
+      pages: write  # deploy the site to GitHub Pages
+      id-token: write  # OIDC authentication for the Pages deployment
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+      - name: Build the chart package and the repository index
+        id: site
+        run: .github/scripts/build_chart_site.sh diracx site
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@df287104677278f869ca5480bd260358397cc3f9 # v1.8.0
+      - name: Upload the site
+        if: steps.site.outputs.published == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          charts_dir: .
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          path: site
+
+      - name: Deploy to GitHub Pages
+        if: steps.site.outputs.published == 'true'
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
